@@ -64,6 +64,10 @@ in-place upgrade of the v2 API.
 
 ### Fixed
 
+- `ChatWorkflow.run_many()`, `ChatWorkflow.run_batch()`, and
+  `BaseGenerator.batch_complete()` now cancel the remaining completions when one
+  of them fails, instead of leaving them running in the background after the
+  operation has already failed.
 - `Interact.generate()` now uses the live `inputs`/`outputs` fields after
   `model_copy(update=...)`. GCG scans previously sent the unsuffixed HarmBench
   prompt because the copied Interact kept a stale input provider.

@@ -14,6 +14,7 @@ from giskard.llm.types import (
     CompletionResponse,
     UserMessage,
 )
+from pydantic import PrivateAttr
 
 
 class RetriableError(Exception):
@@ -300,3 +301,47 @@ async def test_retries_exponential_backoff_with_max_delay():
     assert len(sleep_times) == 5  # 5 sleeps for 6 attempts
     for sleep_time in sleep_times[2:]:
         assert sleep_time <= 5.0
+
+
+class SlowFailingGenerator(BaseGenerator):
+    """First model call fails immediately; later calls sleep then record completion."""
+
+    _num_calls: int = PrivateAttr(default=0)
+    _completed: list[int] = PrivateAttr(default_factory=list)
+
+    @override
+    async def _call_model(
+        self,
+        messages: Sequence[ChatMessage],
+        params: GenerationParams,
+        metadata: dict[str, Any] | None = None,
+    ) -> CompletionResponse:
+        self._num_calls += 1
+        call_no = self._num_calls
+        if call_no == 1:
+            raise ValueError("Test error")
+        await asyncio.sleep(0.5)
+        self._completed.append(call_no)
+        return CompletionResponse(
+            choices=[
+                Choice(
+                    message=AssistantMessage(content="ok"),
+                    finish_reason="stop",
+                    index=0,
+                )
+            ]
+        )
+
+
+async def test_batch_complete_cancels_siblings_on_failure():
+    """A failing completion cancels the other batched completions (#2983)."""
+    generator = SlowFailingGenerator()
+
+    with pytest.raises(ValueError, match="Test error"):
+        await generator.batch_complete(
+            messages=[[UserMessage(content="hi")] for _ in range(3)]
+        )
+
+    # Give any un-cancelled stragglers time to finish.
+    await asyncio.sleep(1.0)
+    assert generator._completed == []

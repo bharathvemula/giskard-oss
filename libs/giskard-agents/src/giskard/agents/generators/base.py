@@ -191,10 +191,25 @@ class BaseGenerator(Discriminated, ABC):
         -------
         list[CompletionResponse]
             A list of model's responses.
+
+        Notes
+        -----
+        If one completion fails, the remaining ones are cancelled instead of
+        being left running in the background.
         """
-        completion_requests = [self.complete(m, params, metadata) for m in messages]
-        responses = await asyncio.gather(*completion_requests)
-        return responses
+        try:
+            async with asyncio.TaskGroup() as task_group:
+                tasks = [
+                    task_group.create_task(self.complete(m, params, metadata))
+                    for m in messages
+                ]
+        except* Exception as exc_group:
+            # Preserve `asyncio.gather`'s first-exception contract: a single
+            # failure raises its own exception, and when several fail at once
+            # only the first one propagates (the rest are already cancelled
+            # by the TaskGroup).
+            raise exc_group.exceptions[0]
+        return [task.result() for task in tasks]
 
     def chat(
         self,

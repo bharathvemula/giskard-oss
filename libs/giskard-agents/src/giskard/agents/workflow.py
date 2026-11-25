@@ -518,11 +518,26 @@ class ChatWorkflow(BaseModel, Generic[OutputType]):
         ------
         WorkflowError
             If the workflow fails and the error policy is RAISE (default).
+
+        Notes
+        -----
+        If one completion fails, the remaining ones are cancelled instead of
+        being left running in the background.
         """
-        results = await asyncio.gather(
-            *[self.run(max_steps=max_steps) for _ in range(n)],
-            return_exceptions=False,
-        )
+        try:
+            async with asyncio.TaskGroup() as task_group:
+                tasks = [
+                    task_group.create_task(self.run(max_steps=max_steps))
+                    for _ in range(n)
+                ]
+        except* Exception as exc_group:
+            # Preserve `asyncio.gather`'s first-exception contract: a single
+            # failure raises its own exception, and when several fail at once
+            # only the first one propagates (the rest are already cancelled
+            # by the TaskGroup).
+            raise exc_group.exceptions[0]
+
+        results = [task.result() for task in tasks]
 
         # If the error mode is SKIP, we return only the successful chats.
         if self.error_policy == ErrorPolicy.SKIP:
@@ -547,16 +562,31 @@ class ChatWorkflow(BaseModel, Generic[OutputType]):
         -------
         List[Chat]
             List of completion results.
+
+        Notes
+        -----
+        If one completion fails, the remaining ones are cancelled instead of
+        being left running in the background.
         """
         workflows = [
             self.model_copy(update={"inputs": {**self.inputs, **params}})
             for params in inputs
         ]
 
-        chats = await asyncio.gather(
-            *[workflow.run(max_steps=max_steps) for workflow in workflows],
-            return_exceptions=False,
-        )
+        try:
+            async with asyncio.TaskGroup() as task_group:
+                tasks = [
+                    task_group.create_task(workflow.run(max_steps=max_steps))
+                    for workflow in workflows
+                ]
+        except* Exception as exc_group:
+            # Preserve `asyncio.gather`'s first-exception contract: a single
+            # failure raises its own exception, and when several fail at once
+            # only the first one propagates (the rest are already cancelled
+            # by the TaskGroup).
+            raise exc_group.exceptions[0]
+
+        chats = [task.result() for task in tasks]
 
         if self.error_policy == ErrorPolicy.SKIP:
             chats = [chat for chat in chats if not chat.failed]

@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Sequence
 from typing import Any, override
 
@@ -84,6 +85,62 @@ class UnknownToolCallGenerator(agents.generators.BaseGenerator):
                 )
             ],
         )
+
+
+class SlowFailingGenerator(agents.generators.BaseGenerator):
+    """First model call fails immediately; later calls sleep then record completion."""
+
+    _num_calls: int = PrivateAttr(default=0)
+    _completed: list[int] = PrivateAttr(default_factory=list)
+
+    @override
+    async def _call_model(
+        self,
+        messages: Sequence[ChatMessage],
+        params: agents.generators.GenerationParams,
+        metadata: dict[str, Any] | None = None,
+    ) -> CompletionResponse:
+        self._num_calls += 1
+        call_no = self._num_calls
+        if call_no == 1:
+            raise ValueError("Test error")
+        await asyncio.sleep(0.5)
+        self._completed.append(call_no)
+        return CompletionResponse(
+            choices=[
+                Choice(
+                    message=AssistantMessage(content="ok"),
+                    finish_reason="stop",
+                    index=0,
+                )
+            ]
+        )
+
+
+async def test_run_many_cancels_siblings_on_failure():
+    """A failing completion cancels the other parallel completions (#2983)."""
+    generator = SlowFailingGenerator()
+    workflow = agents.ChatWorkflow(generator=generator)
+
+    with pytest.raises(WorkflowError):
+        await workflow.chat("Hello!", role="user").run_many(n=3)
+
+    # Give any un-cancelled stragglers time to finish.
+    await asyncio.sleep(1.0)
+    assert generator._completed == []
+
+
+async def test_run_batch_cancels_siblings_on_failure():
+    """A failing completion cancels the other batched completions (#2983)."""
+    generator = SlowFailingGenerator()
+    workflow = agents.ChatWorkflow(generator=generator)
+
+    with pytest.raises(WorkflowError):
+        await workflow.chat("Hello!", role="user").run_batch(inputs=[{}, {}, {}])
+
+    # Give any un-cancelled stragglers time to finish.
+    await asyncio.sleep(1.0)
+    assert generator._completed == []
 
 
 async def test_run_raises_error():
